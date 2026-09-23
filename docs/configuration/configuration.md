@@ -825,6 +825,9 @@ tls_config:
 
 Docker SD configurations allow retrieving scrape targets from [Docker Engine](https://docs.docker.com/engine/) hosts.
 
+Docker API version 1.40 (Docker Engine 19.03) or newer is required. The Moby client
+automatically negotiates the API version with the daemon.
+
 This SD discovers "containers" and will create a target for each network IP and port the container is configured to expose.
 
 Available meta labels:
@@ -931,6 +934,9 @@ for a detailed example of configuring Prometheus for Docker Engine.
 
 Docker Swarm SD configurations allow retrieving scrape targets from [Docker Swarm](https://docs.docker.com/engine/swarm/)
 engine.
+
+Docker API version 1.40 (Docker Engine 19.03) or newer is required. The Moby client
+automatically negotiates the API version with the daemon.
 
 One of the following roles can be configured to discover targets:
 

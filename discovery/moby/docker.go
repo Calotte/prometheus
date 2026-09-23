@@ -22,10 +22,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
 	"github.com/go-kit/log"
+	"github.com/moby/moby/client"
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
@@ -110,7 +108,7 @@ type DockerDiscovery struct {
 	client             *client.Client
 	port               int
 	hostNetworkingHost string
-	filters            filters.Args
+	filters            client.Filters
 }
 
 // NewDockerDiscovery returns a new DockerDiscovery which periodically refreshes its targets.
@@ -129,10 +127,9 @@ func NewDockerDiscovery(conf *DockerSDConfig, logger log.Logger) (*DockerDiscove
 
 	opts := []client.Opt{
 		client.WithHost(conf.Host),
-		client.WithAPIVersionNegotiation(),
 	}
 
-	d.filters = filters.NewArgs()
+	d.filters = make(client.Filters)
 	for _, f := range conf.Filters {
 		for _, v := range f.Values {
 			d.filters.Add(f.Name, v)
@@ -153,13 +150,11 @@ func NewDockerDiscovery(conf *DockerSDConfig, logger log.Logger) (*DockerDiscove
 				Timeout:   time.Duration(conf.RefreshInterval),
 			}),
 			client.WithScheme(hostURL.Scheme),
-			client.WithHTTPHeaders(map[string]string{
-				"User-Agent": userAgent,
-			}),
+			client.WithUserAgent(userAgent),
 		)
 	}
 
-	d.client, err = client.NewClientWithOpts(opts...)
+	d.client, err = client.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("error setting up docker client: %w", err)
 	}
@@ -178,7 +173,7 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 		Source: "Docker",
 	}
 
-	containers, err := d.client.ContainerList(ctx, types.ContainerListOptions{Filters: d.filters})
+	containers, err := d.client.ContainerList(ctx, client.ContainerListOptions{Filters: d.filters})
 	if err != nil {
 		return nil, fmt.Errorf("error while listing containers: %w", err)
 	}
@@ -188,7 +183,7 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 		return nil, fmt.Errorf("error while computing network labels: %w", err)
 	}
 
-	for _, c := range containers {
+	for _, c := range containers.Items {
 		if len(c.Names) == 0 {
 			continue
 		}
@@ -206,6 +201,10 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 
 		for _, n := range c.NetworkSettings.Networks {
 			var added bool
+			var ipAddress string
+			if n.IPAddress.IsValid() {
+				ipAddress = n.IPAddress.String()
+			}
 
 			for _, p := range c.Ports {
 				if p.Type != "tcp" {
@@ -213,13 +212,17 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 				}
 
 				labels := model.LabelSet{
-					dockerLabelNetworkIP:   model.LabelValue(n.IPAddress),
+					dockerLabelNetworkIP:   model.LabelValue(ipAddress),
 					dockerLabelPortPrivate: model.LabelValue(strconv.FormatUint(uint64(p.PrivatePort), 10)),
 				}
 
 				if p.PublicPort > 0 {
 					labels[dockerLabelPortPublic] = model.LabelValue(strconv.FormatUint(uint64(p.PublicPort), 10))
-					labels[dockerLabelPortPublicIP] = model.LabelValue(p.IP)
+					var publicIP string
+					if p.IP.IsValid() {
+						publicIP = p.IP.String()
+					}
+					labels[dockerLabelPortPublicIP] = model.LabelValue(publicIP)
 				}
 
 				for k, v := range commonLabels {
@@ -230,7 +233,7 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 					labels[model.LabelName(k)] = model.LabelValue(v)
 				}
 
-				addr := net.JoinHostPort(n.IPAddress, strconv.FormatUint(uint64(p.PrivatePort), 10))
+				addr := net.JoinHostPort(ipAddress, strconv.FormatUint(uint64(p.PrivatePort), 10))
 				labels[model.AddressLabel] = model.LabelValue(addr)
 				tg.Targets = append(tg.Targets, labels)
 				added = true
@@ -239,7 +242,7 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 			if !added {
 				// Use fallback port when no exposed ports are available or if all are non-TCP
 				labels := model.LabelSet{
-					dockerLabelNetworkIP: model.LabelValue(n.IPAddress),
+					dockerLabelNetworkIP: model.LabelValue(ipAddress),
 				}
 
 				for k, v := range commonLabels {
@@ -254,7 +257,7 @@ func (d *DockerDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 				// so they only end up here, not in the previous loop.
 				var addr string
 				if c.HostConfig.NetworkMode != "host" {
-					addr = net.JoinHostPort(n.IPAddress, strconv.FormatUint(uint64(d.port), 10))
+					addr = net.JoinHostPort(ipAddress, strconv.FormatUint(uint64(d.port), 10))
 				} else {
 					addr = d.hostNetworkingHost
 				}

@@ -17,8 +17,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 
 	"github.com/prometheus/prometheus/util/strutil"
 )
@@ -33,13 +32,13 @@ const (
 	labelNetworkLabelPrefix = labelNetworkPrefix + "label_"
 )
 
-func getNetworksLabels(ctx context.Context, client *client.Client, labelPrefix string) (map[string]map[string]string, error) {
-	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
+func getNetworksLabels(ctx context.Context, dockerClient *client.Client, labelPrefix string) (map[string]map[string]string, error) {
+	networks, err := dockerClient.NetworkList(ctx, client.NetworkListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	labels := make(map[string]map[string]string, len(networks))
-	for _, network := range networks {
+	labels := make(map[string]map[string]string, len(networks.Items))
+	for _, network := range networks.Items {
 		labels[network.ID] = map[string]string{
 			labelPrefix + labelNetworkID:       network.ID,
 			labelPrefix + labelNetworkName:     network.Name,

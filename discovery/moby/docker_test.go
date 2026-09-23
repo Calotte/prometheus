@@ -15,7 +15,10 @@ package moby
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/go-kit/log"
@@ -23,6 +26,73 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v2"
 )
+
+func TestDockerSDAddressesAndFilters(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ip       string
+		publicIP string
+		address  string
+	}{
+		{name: "ipv4", ip: "172.19.0.2", publicIP: "0.0.0.0", address: "172.19.0.2:9100"},
+		{name: "ipv6", ip: "2001:db8::2", publicIP: "::", address: "[2001:db8::2]:9100"},
+		{name: "empty addresses", address: ":9100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, userAgent, r.UserAgent())
+				switch r.URL.Path {
+				case "/_ping":
+					w.Header().Set("API-Version", "1.40")
+				case "/v1.40/containers/json":
+					require.Equal(t, http.MethodGet, r.Method)
+					var filters map[string]map[string]bool
+					require.NoError(t, json.Unmarshal([]byte(r.URL.Query().Get("filters")), &filters))
+					require.Equal(t, map[string]map[string]bool{
+						"name":  {"node": true, "exporter": true},
+						"label": {"job=prometheus": true},
+					}, filters)
+					w.Header().Set("Content-Type", "application/json")
+					_, err := fmt.Fprintf(w, `[{
+						"Id": "node", "Names": ["/node"],
+						"HostConfig": {"NetworkMode": "bridge"},
+						"Ports": [{"PrivatePort": 9100, "PublicPort": 19100, "Type": "tcp", "IP": %q}],
+						"NetworkSettings": {"Networks": {"bridge": {"IPAddress": %q, "NetworkID": "bridge"}}}
+					}]`, tc.publicIP, tc.ip)
+					require.NoError(t, err)
+				case "/v1.40/networks":
+					w.Header().Set("Content-Type", "application/json")
+					_, err := w.Write([]byte(`[]`))
+					require.NoError(t, err)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			cfg := DefaultDockerSDConfig
+			cfg.Host = server.URL
+			cfg.Filters = []Filter{
+				{Name: "name", Values: []string{"node", "exporter"}},
+				{Name: "label", Values: []string{"job=prometheus"}},
+			}
+			d, err := NewDockerDiscovery(&cfg, log.NewNopLogger())
+			require.NoError(t, err)
+			defer d.client.Close()
+
+			groups, err := d.refresh(context.Background())
+			require.NoError(t, err)
+			require.Len(t, groups, 1)
+			require.Len(t, groups[0].Targets, 1)
+			target := groups[0].Targets[0]
+			require.Equal(t, model.LabelValue(tc.address), target[model.AddressLabel])
+			require.Equal(t, model.LabelValue(tc.ip), target[dockerLabelNetworkIP])
+			require.Equal(t, model.LabelValue(tc.publicIP), target[dockerLabelPortPublicIP])
+			require.Equal(t, model.LabelValue("19100"), target[dockerLabelPortPublic])
+		})
+	}
+}
 
 func TestDockerSDRefresh(t *testing.T) {
 	sdmock := NewSDMock(t, "dockerprom")
